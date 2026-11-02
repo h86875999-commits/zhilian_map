@@ -1,0 +1,30 @@
+<script>
+let locationsData = [];
+
+async function loadStoreData() {
+  // 替换成你刚复制的 Web App 网址
+  const API_URL = 'https://script.google.com/macros/s/AKfycbwLchzaHJssIxuS1mp7rTASIsrwLx0LV9egYVQw0bSq7pINpJ_nYZwPkyFIEFWN2y3b/exec';
+  
+  try {
+    const response = await fetch(API_URL);
+    const rawData = await response.json();
+    
+    // 把 Apps Script 返回的字段，映射成地图需要的格式
+    locationsData = rawData.map(row => ({
+      country: row.country,
+      name: row.Store,
+      address: row.address,
+      lat: parseFloat(row.lat),
+      lng: parseFloat(row.lng),
+      brand: row.brand,          // 如 BS, DB
+      businesstype: row.businesstype
+    }));
+    
+    initMap(); // 数据就绪后，初始化地图
+  } catch (error) {
+    console.error('加载门店数据失败:', error);
+  }
+}
+
+window.onload = loadStoreData;
+</script>
