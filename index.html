@@ -1,30 +1,286 @@
-<script>
-let locationsData = [];
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>智联门店分布地图</title>
+    <style>
+        body, html { margin: 0; padding: 0; height: 100%; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+        #map { height: 100%; width: 100%; background-color: #e5e3df; }
 
-async function loadStoreData() {
-  // 替换成你刚复制的 Web App 网址
-  const API_URL = 'https://script.google.com/macros/s/AKfycbwLchzaHJssIxuS1mp7rTASIsrwLx0LV9egYVQw0bSq7pINpJ_nYZwPkyFIEFWN2y3b/exec';
-  
-  try {
-    const response = await fetch(API_URL);
-    const rawData = await response.json();
-    
-    // 把 Apps Script 返回的字段，映射成地图需要的格式
-    locationsData = rawData.map(row => ({
-      country: row.country,
-      name: row.Store,
-      address: row.address,
-      lat: parseFloat(row.lat),
-      lng: parseFloat(row.lng),
-      brand: row.brand,          // 如 BS, DB
-      businesstype: row.businesstype
-    }));
-    
-    initMap(); // 数据就绪后，初始化地图
-  } catch (error) {
-    console.error('加载门店数据失败:', error);
-  }
-}
+        /* 侧边栏 */
+        .sidebar {
+            position: absolute; top: 20px; left: 20px; width: 280px;
+            background: white; padding: 15px 20px; border-radius: 12px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15); z-index: 10;
+            display: flex; flex-direction: column; max-height: 85vh;
+        }
 
-window.onload = loadStoreData;
-</script>
+        .filter-section { margin-bottom: 12px; display: flex; flex-direction: column; }
+        .filter-section h4 { margin: 0 0 8px 0; font-size: 15px; color: #333; }
+
+        /* 搜索框 */
+        .search-box {
+            width: 100%; padding: 6px 10px; margin-bottom: 8px;
+            border: 1px solid #ddd; border-radius: 6px; box-sizing: border-box;
+            font-size: 13px; outline: none;
+        }
+        .search-box:focus { border-color: #4285f4; }
+
+        /* 多选列表容器 */
+        .checkbox-list {
+            overflow-y: auto; max-height: 140px; border: 1px solid #eee; border-radius: 6px; padding: 8px;
+        }
+        .checkbox-item {
+            display: flex; align-items: center; margin-bottom: 6px; font-size: 13px; cursor: pointer;
+        }
+        .checkbox-item input { margin-right: 8px; cursor: pointer; }
+
+        /* 结果统计 */
+        .result-count {
+            margin-top: auto; font-size: 15px; border-top: 1px solid #eee; padding-top: 15px; font-weight: bold;
+        }
+        .result-count span { color: black; }
+
+        /* 弹窗样式 */
+        .info-card { width: 280px; padding: 15px; font-family: sans-serif; }
+        .info-card h3 { margin: 0 0 8px 0; font-size: 16px; color: #000; }
+        .info-card p { margin: 0 0 10px 0; font-size: 13px; color: #555; line-height: 1.4; }
+        .info-tag { display: inline-block; font-size: 12px; color: #333; background: #f0f0f0; padding: 3px 8px; border-radius: 4px; margin-right: 5px; }
+    </style>
+    
+    <!-- ⚠️ 注意：去掉 defer 或 async，确保地图 API 优先加载 -->
+    <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyB5wHlaWUxsoxDrf0FoSexVIMEYCVAr0VE"></script>
+</head>
+<body>
+
+    <div class="sidebar">
+        <div class="filter-section">
+            <h4>筛选国家 (Country)</h4>
+            <input type="text" id="search-country" class="search-box" placeholder="搜索国家...">
+            <div class="checkbox-list" id="list-country"></div>
+        </div>
+
+        <div class="filter-section">
+            <h4>筛选品牌 (Brand)</h4>
+            <input type="text" id="search-brand" class="search-box" placeholder="搜索品牌...">
+            <div class="checkbox-list" id="list-brand"></div>
+        </div>
+
+        <div class="result-count">
+            找到结果: <span id="count-display">0</span> 个
+        </div>
+    </div>
+
+    <div id="map"></div>
+
+    <script>
+        // 1. 定义全局变量
+        let locationsData = []; // 现在是空的，等会儿从 Google 拉取
+        let map, currentMarkers = [], activeInfoWindow = null;
+        let selectedCountries = new Set(); 
+        let selectedBrands = new Set(); 
+
+        // ⚠️ 品牌图标配置（建议用你之前成功的在线链接）
+        const brandIconsConfig = {
+            "GAC": "https://i.imgur.com/YRxQLa3.png",
+            "Geely": "https://i.imgur.com/APPQExH.png",
+            "Leapmotor": "https://i.imgur.com/GTWO4oa.png",
+            "Zeekr": "https://i.imgur.com/2zKQfym.png",
+            "GWM": "https://i.imgur.com/ChLNSbz.png",
+            "Default": "https://maps.google.com/mapfiles/ms/icons/blue-dot.png"
+        };
+
+        let googleIcons = {};
+        for (const [brand, url] of Object.entries(brandIconsConfig)) {
+            googleIcons[brand] = {
+                url: url,
+                scaledSize: new google.maps.Size(36, 36),
+                anchor: new google.maps.Point(18, 18)
+            };
+        }
+
+        // 2. 核心：去 Google Sheets 拉取数据
+        async function loadStoreData() {
+            // ⚠️ 替换成你刚才部署的 Apps Script 网址
+            const API_URL = 'https://script.google.com/macros/s/AKfycbwLchzaHJssIxuS1mp7rTASIsrwLx0LV9egYVQw0bSq7pINpJ_nYZwPkyFIEFWN2y3b/exec';
+            
+            try {
+                const response = await fetch(API_URL);
+                const rawData = await response.json();
+                
+                // 把 Google 表格的数据，映射成地图需要的格式
+                locationsData = rawData.map(row => ({
+                    country: row.country,
+                    name: row.Store,
+                    address: row.address,
+                    lat: parseFloat(row.lat),
+                    lng: parseFloat(row.lng),
+                    brand: row.brand,
+                    type: row.businesstype
+                }));
+                
+                console.log("数据拉取成功，共", locationsData.length, "条");
+                initMap(); // 数据准备好了，开始渲染地图
+                
+            } catch (error) {
+                console.error('加载门店数据失败:', error);
+                alert('数据加载失败，请检查控制台报错');
+            }
+        }
+
+        // 3. 初始化地图及侧边栏（你的原有逻辑）
+        function initMap() {
+            if (locationsData.length === 0) {
+                console.log("没有数据，无法初始化地图");
+                return;
+            }
+
+            map = new google.maps.Map(document.getElementById("map"), {
+                center: { lat: locationsData[0].lat || 1.130, lng: locationsData[0].lng || 104.053 },
+                zoom: 5,
+                disableDefaultUI: true,
+                zoomControl: true,
+            });
+
+            // 提取并渲染国家
+            const countries = [...new Set(locationsData.map(item => item.country))].sort();
+            renderCheckboxes('list-country', 'country', countries, selectedCountries);
+            document.getElementById('select-all-country').addEventListener('change', (e) => handleSelectAll(e, 'country', selectedCountries));
+
+            // 提取并渲染品牌
+            const brands = [...new Set(locationsData.map(item => item.brand))].sort();
+            renderCheckboxes('list-brand', 'brand', brands, selectedBrands);
+            document.getElementById('select-all-brand').addEventListener('change', (e) => handleSelectAll(e, 'brand', selectedBrands));
+
+            renderMarkers();
+
+            // 绑定搜索事件
+            document.getElementById('search-country').addEventListener('input', (e) => filterList('list-country', e.target.value));
+            document.getElementById('search-brand').addEventListener('input', (e) => filterList('list-brand', e.target.value));
+        }
+
+        // 4. 以下全是你 Python 脚本里原有的渲染逻辑，没做任何改动
+        function renderCheckboxes(containerId, type, items, selectedSet) {
+            const container = document.getElementById(containerId);
+            container.innerHTML = '';
+
+            const allLabel = document.createElement('label');
+            allLabel.className = 'checkbox-item';
+            allLabel.innerHTML = `<input type="checkbox" id="select-all-${type}" checked> <strong>全选 (Select All)</strong>`;
+            container.appendChild(allLabel);
+
+            const hr = document.createElement('hr');
+            hr.style.border = '0'; hr.style.borderTop = '1px dashed #eee'; hr.style.margin = '5px 0 10px 0';
+            container.appendChild(hr);
+
+            items.forEach(item => {
+                selectedSet.add(item);
+                const label = document.createElement('label');
+                label.className = 'checkbox-item';
+                label.innerHTML = `<input type="checkbox" class="cb-${type}" value="${item}" checked> ${item}`;
+
+                label.querySelector('input').addEventListener('change', (e) => {
+                    if (e.target.checked) selectedSet.add(item);
+                    else selectedSet.delete(item);
+                    updateSelectAllState(type);
+                    renderMarkers();
+                });
+                container.appendChild(label);
+            });
+        }
+
+        function handleSelectAll(e, type, selectedSet) {
+            const isChecked = e.target.checked;
+            document.querySelectorAll(`.cb-${type}`).forEach(cb => {
+                if(cb.parentElement.style.display !== 'none') {
+                    cb.checked = isChecked;
+                    if(isChecked) selectedSet.add(cb.value);
+                    else selectedSet.delete(cb.value);
+                }
+            });
+            renderMarkers();
+        }
+
+        function filterList(containerId, keyword) {
+            const labels = document.querySelectorAll(`#${containerId} .checkbox-item`);
+            const kw = keyword.toLowerCase();
+            labels.forEach(label => {
+                if (label.querySelector('input[id^="select-all"]')) return;
+                const text = label.textContent.toLowerCase();
+                label.style.display = text.includes(kw) ? 'flex' : 'none';
+            });
+        }
+
+        function updateSelectAllState(type) {
+            const classSelector = type === 'country' ? '.cb-country' : '.cb-brand';
+            const allId = type === 'country' ? 'select-all-country' : 'select-all-brand';
+            const allCbs = document.querySelectorAll(classSelector);
+            const checkedCbs = document.querySelectorAll(classSelector + ':checked');
+            const selectAllBox = document.getElementById(allId);
+
+            if (allCbs.length === checkedCbs.length) {
+                selectAllBox.checked = true;
+                selectAllBox.indeterminate = false;
+            } else if (checkedCbs.length === 0) {
+                selectAllBox.checked = false;
+                selectAllBox.indeterminate = false;
+            } else {
+                selectAllBox.checked = false;
+                selectAllBox.indeterminate = true;
+            }
+        }
+
+        function renderMarkers() {
+            currentMarkers.forEach(marker => marker.setMap(null));
+            currentMarkers = [];
+            if (activeInfoWindow) activeInfoWindow.close();
+
+            const filteredData = locationsData.filter(item => 
+                selectedCountries.has(item.country) && selectedBrands.has(item.brand)
+            );
+            document.getElementById('count-display').textContent = filteredData.length;
+
+            filteredData.forEach((data, index) => {
+                const iconConfig = googleIcons[data.brand] || googleIcons["Default"];
+
+                const marker = new google.maps.Marker({
+                    map: map,
+                    position: { lat: data.lat, lng: data.lng },
+                    title: data.name,
+                    icon: iconConfig,
+                    zIndex: index + 1
+                });
+
+                marker.addListener("click", () => {
+                    if (activeInfoWindow) activeInfoWindow.close();
+                    marker.setZIndex(google.maps.Marker.MAX_ZINDEX + 1); 
+                    map.panTo(marker.getPosition());
+                    map.setZoom(14);
+
+                    const contentString = `
+                        <div class="info-card">
+                            <h3>${data.name}</h3>
+                            <p>Address:</p>
+                            <p>${data.address}</p>
+                            <div>
+                                <span class="info-tag">Business Type: ${data.type}</span>
+                            </div>
+                        </div>
+                    `;
+
+                    activeInfoWindow = new google.maps.InfoWindow({
+                        content: contentString
+                    });
+                    activeInfoWindow.open(map, marker);
+                });
+
+                currentMarkers.push(marker);
+            });
+        }
+
+        // 5. 页面加载时，先执行拉数据
+        window.onload = loadStoreData;
+    </script>
+</body>
+</html>
