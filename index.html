@@ -106,7 +106,7 @@
             const API_URL = 'https://script.google.com/macros/s/AKfycbwKReyr6z_lXPuIeQPRxoMaG8WbQsxM7KuW9x903oMfJikDwFQxpCb1rYq0eD96L-UaSQ/exec';
             
             try {
-                const response = await fetch(API_URL);
+                const response = await fetch(API_URL + '?t=' + new Date().getTime());;
                 const rawData = await response.json();
                 
                 // 把 Google 表格的数据，映射成地图需要的格式
